@@ -12,6 +12,7 @@ import copy
 import spacy
 import lemminflect
 
+
 nlp = spacy.load('en_core_web_sm', disable=['ner', 'parser'])
 POS = ("CC", "CD", "DT", "EX", "FW", "IN", "JJ", "JJR", "JJS", "LS", "MD", "NN", 
        "NNP", "NNPS", "NNS", "PDT", "PRP", "PRP$", "RB", "RBR", "RBS", "RP", "VB", 
@@ -110,6 +111,7 @@ def extract_vectors(word, iteration, deltas=None, bits=32):
         return representations  # return zeros if no neighbors found
     return representations / total_adjacent_words # we take the average of all neighbors by dividing the sum of their represntations by the count of neighbors.
 
+
 def update_encoding(word, iteration, args):
     """Replaces the previous vector representation of word in iterative_vectors with the new one.
     """
@@ -125,14 +127,23 @@ def normalize_vector():
 def normalize_vector_dimensions(iterative_vectors):
     """Normalizes vector dimensions by (1) normalizing the length of each vector to 1 and (2) normalizing vectors along the dimensions (columns) using Robust Scaling to ignore outliers while simultaneously adjusting the scale of each dimension.
     """
-    vectors = np.array(list(iterative_vectors.values())) # convert to np array for speed
-    vectors = vectors / np.linalg.norm(vectors, axis=1, keepdims=True) # normalize along rows (words)
-    vectors = np.nan_to_num(vectors, 0)  # replace NaN with 0
-    vectors = (vectors - np.median(vectors,0)) / scipy.stats.iqr(vectors,0) # normalize along columns (dimensions)
-    vectors = np.nan_to_num(vectors, 0)  # replace NaN with 0
-    return { # convert back to dictionary
+    vectors = np.array(list(iterative_vectors.values()))
+
+    # Row normalization
+    norms = np.linalg.norm(vectors, axis=1, keepdims=True)
+    norms[norms == 0] = 1
+    vectors = vectors / norms
+
+    # Column normalization (robust scaling)
+    med = np.median(vectors, axis=0)
+    iqr = scipy.stats.iqr(vectors, axis=0)
+    iqr[iqr == 0] = 1
+    vectors = (vectors - med) / iqr
+
+    return {
         word: list(vectors[i]) for i, word in enumerate(iterative_vectors.keys())
     }
+
 
 def sigmoid_normalize_vectors():
     """Not used in current implementation.
@@ -143,13 +154,15 @@ def sigmoid_normalize_vectors():
 if __name__ == '__main__':
     import os
     ITERATIONS = 400 # some amount of iterations, around 200 should be sufficient currently to observe the periodicity.
-
+    NEIGHBORHOOD_SIZE = 4 # number of words to the left and right to consider as neighbors
     # Create deltas from -x to x excluding 0
-    x = 6
+    x = NEIGHBORHOOD_SIZE
     deltas = []
-    for i in range(1, x):
-        deltas.append(-i)
-        deltas.append(i)
+    deltas = [i for i in range(-NEIGHBORHOOD_SIZE, NEIGHBORHOOD_SIZE + 1) if i != 0]
+
+
+    print(deltas)
+
 
     # Create output directory if it doesn't exist
     os.makedirs('data/iterative_vectors', exist_ok=True)
@@ -160,5 +173,5 @@ if __name__ == '__main__':
         for word in tqdm(list(tf_idfs.keys()), desc=f"Iteration {i}/{ITERATIONS}", dynamic_ncols=True, leave=True, file=sys.stdout, ascii=True): # tqdm just gives fancy progress bar
             update_encoding(word, i, {'deltas': deltas, 'bits':32})
         iterative_vectors = normalize_vector_dimensions(iterative_vectors)
-        with open(f'data/iterative_vectors/{i}.json', 'w+') as f:
+        with open(f'data/iterative_vectors/window_{NEIGHBORHOOD_SIZE}_iter_{i}.json', 'w+') as f:
             json.dump(iterative_vectors, f, indent=4) # saves file for each iteration for future reference
