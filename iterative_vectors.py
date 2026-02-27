@@ -11,7 +11,20 @@ import json
 import copy
 import spacy
 import lemminflect
+import os
+os.chdir(os.path.dirname(os.path.abspath(__file__)))
 
+print(os.getcwd())
+
+# Try to import CuPy for GPU acceleration, fallback to NumPy if unavailable
+try:
+    import cupy as cp
+    USE_GPU = True
+    print("✓ GPU detected and initialized\n")
+except Exception as e:
+    print(f"⚠ GPU unavailable ({str(e)}), using CPU instead\n")
+    cp = np
+    USE_GPU = False
 
 nlp = spacy.load('en_core_web_sm', disable=['ner', 'parser'])
 POS = ("CC", "CD", "DT", "EX", "FW", "IN", "JJ", "JJR", "JJS", "LS", "MD", "NN", 
@@ -45,11 +58,12 @@ iterative_vectors = {}
 
 def rescale_bloom_filter(): # Rescales bloom filters to be in range [-1, 1] instead of [0, 1]
     for word in bloom_filters.keys():
-        bloom_filters[word] = np.array(bloom_filters[word], dtype=int) * 2 - 1
+        bloom_filters[word] = cp.array(bloom_filters[word], dtype=int) * 2 - 1
 
 def generate_vector(word, tokenized_sentence, bits, deltas, iteration):
     """ 
     Generates vector representation for word when given a sentence.
+    Uses GPU (CuPy) for accelerated computation.
     
     Args:
         word (str): The word to sum the neighbors of. Note that multiple instances of the word could occur.
@@ -59,11 +73,11 @@ def generate_vector(word, tokenized_sentence, bits, deltas, iteration):
         iteration (int): The iteration. Although an integer input, indicates whether a previous iteration has occurred. If not, we will use the bloom filters of each word as their representations. Otherwise, we will use the representations from the previous iteration.
         
     Returns:
-        instance_representation (np.array): The vector representation of this instance of the word prior to averaging by the number of neighbors (currently, the sum of the representations of all the neighbors).
+        instance_representation (cp.ndarray): The vector representation (on GPU) prior to averaging by the number of neighbors.
         adjacent_words (int): The number of adjacent words that were found and used to construct the representation.
     """
     indices = [i for i, x in enumerate(tokenized_sentence) if x == word] # Gets the indices of all occurrences of the word in this sentence.
-    instance_representation = np.zeros(bits) 
+    instance_representation = cp.zeros(bits) 
     adjacent_words = 0
 
     for index in indices: # for each occurrence of the word in the sentence
@@ -78,9 +92,9 @@ def generate_vector(word, tokenized_sentence, bits, deltas, iteration):
                     tf_idf = 0
                 try: # if the neighbor word doesn't have a representation on file, skip it
                     if iteration: # if this is not the first iteration, we use the preassigned iterative vectors for the adjacent word.
-                        instance_representation += np.array(preassign_iterative_vectors[adjacent_word]) * tf_idf
+                        instance_representation += cp.array(preassign_iterative_vectors[adjacent_word]) * tf_idf
                     else:
-                        instance_representation += np.array(bloom_filters[adjacent_word]) * tf_idf
+                        instance_representation += bloom_filters[adjacent_word] * tf_idf
                     adjacent_words += 1
                 except KeyError:
                     continue
@@ -88,7 +102,7 @@ def generate_vector(word, tokenized_sentence, bits, deltas, iteration):
 
 def extract_vectors(word, iteration, deltas=None, bits=32):
     """ 
-        Extracts the vector representation of a word.
+        Extracts the vector representation of a word using GPU acceleration.
         
         Args:
             word (str): The word we are finding the representation of.
@@ -100,7 +114,7 @@ def extract_vectors(word, iteration, deltas=None, bits=32):
         deltas = [-4, -3, -2, -1, 1, 2, 3, 4]
 
     total_adjacent_words = 0
-    representations = np.zeros(bits)
+    representations = cp.zeros(bits)
 
     for sentence in tokenized_corpus:
         if word in sentence: # if the word is in the sentence, we pass it to the generate_vector function.
@@ -114,42 +128,60 @@ def extract_vectors(word, iteration, deltas=None, bits=32):
 
 def update_encoding(word, iteration, args):
     """Replaces the previous vector representation of word in iterative_vectors with the new one.
+    Stores as GPU array for faster subsequent operations.
     """
     vector = extract_vectors(word, iteration, **args)
     iterative_vectors[word] = vector
 
 def normalize_vector():
-    """This is not used in the current implementation, but it normalizes the vectors to unit length.
+    """This is not used in the current implementation, but it normalizes the vectors to unit length using GPU acceleration.
     """
     for word in iterative_vectors.keys():
-        iterative_vectors[word] = list(iterative_vectors[word] / np.linalg.norm(iterative_vectors[word])) # normalized & list conversion
+        iterative_vectors[word] = iterative_vectors[word] / cp.linalg.norm(iterative_vectors[word]) # normalized on GPU
 
 def normalize_vector_dimensions(iterative_vectors):
     """Normalizes vector dimensions by (1) normalizing the length of each vector to 1 and (2) normalizing vectors along the dimensions (columns) using Robust Scaling to ignore outliers while simultaneously adjusting the scale of each dimension.
+    Uses GPU acceleration with CuPy.
     """
-    vectors = np.array(list(iterative_vectors.values()))
+    # Convert to GPU arrays
+    vectors = cp.array([cp.asnumpy(iterative_vectors[word]) if isinstance(iterative_vectors[word], cp.ndarray) 
+                        else iterative_vectors[word] for word in iterative_vectors.keys()])
 
-    # Row normalization
-    norms = np.linalg.norm(vectors, axis=1, keepdims=True)
+    # Row normalization (GPU)
+    norms = cp.linalg.norm(vectors, axis=1, keepdims=True)
     norms[norms == 0] = 1
     vectors = vectors / norms
 
-    # Column normalization (robust scaling)
-    med = np.median(vectors, axis=0)
-    iqr = scipy.stats.iqr(vectors, axis=0)
+    # Column normalization (robust scaling on GPU)
+    med = cp.median(vectors, axis=0)
+    # CuPy equivalent of scipy.stats.iqr
+    q75 = cp.percentile(vectors, 75, axis=0)
+    q25 = cp.percentile(vectors, 25, axis=0)
+    iqr = q75 - q25
     iqr[iqr == 0] = 1
     vectors = (vectors - med) / iqr
 
     return {
-        word: list(vectors[i]) for i, word in enumerate(iterative_vectors.keys())
+        word: vectors[i] for i, word in enumerate(iterative_vectors.keys())
     }
 
 
 def sigmoid_normalize_vectors():
-    """Not used in current implementation.
+    """Not used in current implementation. GPU-accelerated sigmoid normalization.
     """
     for word in iterative_vectors.keys():
-        iterative_vectors[word] = list(2 / (1 + np.exp(-iterative_vectors[word])) - 1) # sigmoid function + scale to pos/neg
+        iterative_vectors[word] = 2 / (1 + cp.exp(-iterative_vectors[word])) - 1  # sigmoid function + scale to pos/neg on GPU
+
+def convert_to_cpu(iterative_vectors):
+    """Convert GPU arrays back to CPU for JSON serialization.
+    """
+    cpu_vectors = {}
+    for word, vector in iterative_vectors.items():
+        if isinstance(vector, cp.ndarray):
+            cpu_vectors[word] = cp.asnumpy(vector).tolist()
+        else:
+            cpu_vectors[word] = vector
+    return cpu_vectors
 
 if __name__ == '__main__':
     import os
@@ -160,9 +192,8 @@ if __name__ == '__main__':
     deltas = []
     deltas = [i for i in range(-NEIGHBORHOOD_SIZE, NEIGHBORHOOD_SIZE + 1) if i != 0]
 
-
-    print(deltas)
-
+    print(f"Using {'GPU (CuPy)' if USE_GPU else 'CPU (NumPy)'} for acceleration")
+    print(f"Deltas: {deltas}")
 
     # Create output directory if it doesn't exist
     os.makedirs('data/iterative_vectors', exist_ok=True)
@@ -173,5 +204,8 @@ if __name__ == '__main__':
         for word in tqdm(list(tf_idfs.keys()), desc=f"Iteration {i}/{ITERATIONS}", dynamic_ncols=True, leave=True, file=sys.stdout, ascii=True): # tqdm just gives fancy progress bar
             update_encoding(word, i, {'deltas': deltas, 'bits':32})
         iterative_vectors = normalize_vector_dimensions(iterative_vectors)
+        
+        # Convert GPU arrays to CPU for JSON serialization
+        cpu_vectors = convert_to_cpu(iterative_vectors)
         with open(f'data/iterative_vectors/window_{NEIGHBORHOOD_SIZE}_iter_{i}.json', 'w+') as f:
-            json.dump(iterative_vectors, f, indent=4) # saves file for each iteration for future reference
+            json.dump(cpu_vectors, f, indent=4) # saves file for each iteration for future reference

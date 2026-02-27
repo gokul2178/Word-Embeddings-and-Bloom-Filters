@@ -4,7 +4,7 @@
 # In[ ]:
 
 import os
-os.chdir("/home/gokulanand/Word-Embeddings-and-Bloom-Filters")
+os.chdir(os.path.dirname(os.path.abspath(__file__)))
 import mmh3
 
 def bloom_filter(word, bits=32): # 16 distinct values
