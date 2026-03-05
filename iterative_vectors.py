@@ -14,8 +14,6 @@ import lemminflect
 import os
 os.chdir(os.path.dirname(os.path.abspath(__file__)))
 
-print(os.getcwd())
-
 # Try to import CuPy for GPU acceleration, fallback to NumPy if unavailable
 try:
     import cupy as cp
@@ -53,7 +51,8 @@ with open('data/fairytales_word_bloom-filters.json', 'r') as f:
     bloom_filters = json.load(f)
 with open('data/fairytales_tokenized.json', 'r') as f:
     tokenized_corpus = json.load(f)
-
+    #FOR TESTING
+    #tokenized_corpus = tokenized_corpus[:200]
 iterative_vectors = {}
 
 def rescale_bloom_filter(): # Rescales bloom filters to be in range [-1, 1] instead of [0, 1]
@@ -144,7 +143,7 @@ def normalize_vector_dimensions(iterative_vectors):
     Uses GPU acceleration with CuPy.
     """
     # Convert to GPU arrays
-    vectors = cp.array([cp.asnumpy(iterative_vectors[word]) if isinstance(iterative_vectors[word], cp.ndarray) 
+    vectors = cp.array([(iterative_vectors[word]) if isinstance(iterative_vectors[word], cp.ndarray) 
                         else iterative_vectors[word] for word in iterative_vectors.keys()])
 
     # Row normalization (GPU)
@@ -176,11 +175,9 @@ def convert_to_cpu(iterative_vectors):
     """Convert GPU arrays back to CPU for JSON serialization.
     """
     cpu_vectors = {}
+    cpu_vectors = {}
     for word, vector in iterative_vectors.items():
-        if isinstance(vector, cp.ndarray):
-            cpu_vectors[word] = cp.asnumpy(vector).tolist()
-        else:
-            cpu_vectors[word] = vector
+        cpu_vectors[word] = vector.tolist()
     return cpu_vectors
 
 if __name__ == '__main__':
